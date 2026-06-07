@@ -17,6 +17,11 @@ CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
 # Optional TOML configuration file
 RAG_TOML = BASE_DATA_DIR / "rag-service.toml"
 
+# External vector-store connection URLs (optional — leave unset for local/dev use)
+QDRANT_URL: str | None = os.environ.get("QDRANT_URL")
+QDRANT_API_KEY: str | None = os.environ.get("QDRANT_API_KEY")
+MILVUS_URL: str | None = os.environ.get("MILVUS_URL")
+
 
 def load_toml() -> dict:
     """Load and return the rag-service.toml config; returns an empty dict if absent or invalid."""
@@ -26,3 +31,10 @@ def load_toml() -> dict:
         return tomllib.loads(RAG_TOML.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
+
+# Qdrant vector store settings
+QDRANT_URL: str = os.environ.get("QDRANT_URL", "")
+QDRANT_API_KEY: str = os.environ.get("QDRANT_API_KEY", "")
+
+# Milvus vector store settings (reserved for Phase 1 Increment 11)
+MILVUS_URL: str = os.environ.get("MILVUS_URL", "")

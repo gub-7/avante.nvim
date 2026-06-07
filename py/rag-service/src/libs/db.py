@@ -101,12 +101,41 @@ CREATE TABLE IF NOT EXISTS benchmark_cache (
     PRIMARY KEY (hw_hash, backend, model, context_tokens)
 );
 
+-- Canonical document registry (one row per ingested file/URL)
+CREATE TABLE IF NOT EXISTS documents (
+    document_id TEXT PRIMARY KEY,
+    uri TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    metadata_json TEXT,
+    indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_documents_uri ON documents(uri);
+CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash);
+
+-- Canonical chunk store (source of truth for all text content)
+-- Vector backends store only chunk_id + score; full text lives here.
+CREATE TABLE IF NOT EXISTS chunks (
+    chunk_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    content TEXT NOT NULL,
+    token_count INTEGER NOT NULL,
+    metadata_json TEXT,
+    path TEXT,
+    start_line INTEGER,
+    end_line INTEGER,
+    indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
+CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
+
 -- Schema version sentinel
 CREATE TABLE IF NOT EXISTS _schema_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR REPLACE INTO _schema_meta(key, value) VALUES ('version', '2');
+INSERT OR REPLACE INTO _schema_meta(key, value) VALUES ('version', '3');
 """
 
 

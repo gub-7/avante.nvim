@@ -1,0 +1,35 @@
+{
+  "queries": [
+    {
+      "query": "what does the retrieve endpoint do?",
+      "base_uri": "/home/user/project",
+      "mode": "ask",
+      "top_k": 5
+    },
+    {
+      "query": "how is chunking implemented?",
+      "base_uri": "/home/user/project",
+      "mode": "search",
+      "top_k": 10
+    },
+    {
+      "query": "HybridRetriever.retrieve",
+      "base_uri": "/home/user/project",
+      "mode": "ask",
+      "top_k": 3
+    },
+    {
+      "query": "explain the reranking algorithm",
+      "base_uri": "/home/user/project",
+      "mode": "ask",
+      "top_k": 5
+    },
+    {
+      "query": "src/rag/engine.py",
+      "base_uri": "/home/user/project",
+      "mode": "search",
+      "top_k": 5
+    }
+  ]
+}
+

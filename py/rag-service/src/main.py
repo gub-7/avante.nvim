@@ -28,6 +28,7 @@ from api import rag as rag_router
 from api import runtime as runtime_router
 from api import evals as evals_router
 from api import chat_history as chat_history_router
+from api import dashboard as dashboard_router
 
 LOCK_FILE = BASE_DATA_DIR / "leader.lock"
 
@@ -116,4 +117,5 @@ app.include_router(rag_router.router)
 app.include_router(runtime_router.router)
 app.include_router(evals_router.router)
 app.include_router(chat_history_router.router)
+app.include_router(dashboard_router.router)
 

@@ -488,9 +488,37 @@ end
 -- New Phase-6 / Phase-10 / Phase-11 / Phase-15 RPC wrappers
 -- ---------------------------------------------------------------------------
 
+---@class AvanteRagServiceRetrieveOpts
+---@field mode string | nil       SearchMode: "auto"|"exact"|"semantic"|"hybrid"
+---@field shadow boolean | nil    Run a shadow backend but return only the primary result
+---@field purpose string | nil    SearchPurpose hint: "agentic"|"context"|"search"
+---@field parent_request_id string | nil  Parent request ID for agent sub-queries
+
+--- Merge optional routing kwargs into a query_body copy.
+--- Modifies and returns the (possibly new) table.
+---@param query_body table
+---@param opts AvanteRagServiceRetrieveOpts | nil
+---@return table
+local function _apply_retrieve_opts(query_body, opts)
+  if opts == nil then opts = {} end
+  local body = vim.tbl_extend("force", query_body, {})
+  if opts.mode ~= nil then body.mode = opts.mode end
+  -- Apply shadow: per-call opts take precedence, then fall back to the global config toggle
+  if opts.shadow ~= nil then
+    body.shadow = opts.shadow
+  elseif Config.rag_service.shadow_mode then
+    body.shadow = true
+  end
+  if opts.purpose ~= nil then body.purpose = opts.purpose end
+  if opts.parent_request_id ~= nil then body.parent_request_id = opts.parent_request_id end
+  return body
+end
+
 ---@param query_body table  RetrievalQuery fields
 ---@param on_complete fun(resp: table | nil, error: string | nil): nil
-function M.rag_search(query_body, on_complete)
+---@param opts AvanteRagServiceRetrieveOpts | nil  Optional routing kwargs
+function M.rag_search(query_body, on_complete, opts)
+  query_body = _apply_retrieve_opts(query_body, opts)
   query_body.base_uri = M.to_container_uri(query_body.base_uri or "")
   curl.post(M.get_rag_service_url() .. "/api/v1/rag/search", {
     headers = { ["Content-Type"] = "application/json" },
@@ -510,7 +538,9 @@ end
 
 ---@param query_body table  RetrievalQuery fields
 ---@param on_complete fun(resp: table | nil, error: string | nil): nil
-function M.rag_retrieve(query_body, on_complete)
+---@param opts AvanteRagServiceRetrieveOpts | nil  Optional routing kwargs
+function M.rag_retrieve(query_body, on_complete, opts)
+  query_body = _apply_retrieve_opts(query_body, opts)
   query_body.base_uri = M.to_container_uri(query_body.base_uri or "")
   curl.post(M.get_rag_service_url() .. "/api/v1/rag/retrieve", {
     headers = { ["Content-Type"] = "application/json" },
@@ -540,7 +570,9 @@ end
 
 ---@param query_body table  RetrievalQuery fields
 ---@param on_complete fun(resp: table | nil, error: string | nil): nil
-function M.rag_context(query_body, on_complete)
+---@param opts AvanteRagServiceRetrieveOpts | nil  Optional routing kwargs
+function M.rag_context(query_body, on_complete, opts)
+  query_body = _apply_retrieve_opts(query_body, opts)
   query_body.base_uri = M.to_container_uri(query_body.base_uri or "")
   curl.post(M.get_rag_service_url() .. "/api/v1/rag/context", {
     headers = { ["Content-Type"] = "application/json" },
@@ -569,7 +601,9 @@ end
 
 ---@param query_body table  RetrievalQuery fields
 ---@param on_complete fun(resp: table | nil, error: string | nil): nil
-function M.rag_agentic_retrieve(query_body, on_complete)
+---@param opts AvanteRagServiceRetrieveOpts | nil  Optional routing kwargs
+function M.rag_agentic_retrieve(query_body, on_complete, opts)
+  query_body = _apply_retrieve_opts(query_body, opts)
   query_body.base_uri = M.to_container_uri(query_body.base_uri or "")
   curl.post(M.get_rag_service_url() .. "/api/v1/rag/agentic-retrieve", {
     headers = { ["Content-Type"] = "application/json" },

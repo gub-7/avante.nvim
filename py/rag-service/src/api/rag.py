@@ -7,19 +7,24 @@ Phase 2 exposed exact-search only.
 Phase 4 added symbol search.
 Phase 6 adds /retrieve and /context endpoints, and upgrades /search to use
 the full HybridRetriever pipeline (exact + symbol + semantic + rerank + budget).
+Phase 12 (Increment 12) adds backend, mode, shadow, and request_id surface.
 """
 
 from __future__ import annotations
+
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from libs.utils import is_local_uri, uri_to_path
 from models.rag import FileSpan, RagContextResponse, RetrievalQuery, RetrievedContext
 from pydantic import BaseModel
-from api.chat_history import _idx as _chat_history
 from rag.engine import get_index
 from rag.hybrid_retriever import HybridRetriever
+from rag.pipeline import RetrievalPipeline
 from rag.semantic_search import SemanticRetriever
 from rag.symbol_index import search_symbols
+
+from api.chat_history import _idx as _chat_history
 
 router = APIRouter(prefix="/api/v1/rag", tags=["rag"])
 
@@ -31,6 +36,23 @@ router = APIRouter(prefix="/api/v1/rag", tags=["rag"])
 # ---------------------------------------------------------------------------
 
 _hybrid = HybridRetriever(semantic=SemanticRetriever(get_index), chat_history=_chat_history)
+
+
+def _make_telemetry_sink():
+    """Return a TelemetrySink connected to the configured telemetry DB, or None."""
+    try:
+        from observability.telemetry_db import TelemetrySink, init_telemetry_db  # noqa: PLC0415
+        conn = init_telemetry_db()
+        return TelemetrySink(conn)
+    except Exception:
+        return None
+
+
+_pipeline = RetrievalPipeline(
+    backends={},
+    telemetry=_make_telemetry_sink(),
+    hybrid_retriever=_hybrid,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +93,7 @@ async def rag_search(query: RetrievalQuery) -> list[FileSpan]:
             status_code=404,
             detail=f"Directory not found: {base}",
         )
-    ctx = _hybrid.retrieve(query)
+    ctx = _pipeline.run(query)
     return ctx.spans
 
 
@@ -119,15 +141,24 @@ async def rag_retrieve(query: RetrievalQuery) -> RetrievedContext:
     deduplicates, applies freshness signals, reranks, and trims to the
     mode-appropriate context budget.
 
+    Increment-12 additions:
+    - Generates a ``request_id`` (uuid4) if the client did not supply one.
+    - ``shadow`` flag is accepted; shadow execution is not yet implemented
+      but the field is validated and forwarded for future router support.
+    - ``parent_request_id`` is accepted for agent sub-query tracing.
+
     Args:
         query: Retrieval parameters.
 
     Returns:
         A RetrievedContext containing ranked spans, lightweight citations,
-        compat source objects, and a token estimate.
+        compat source objects, a token estimate, and a ``request_id``.
 
     """
-    return _hybrid.retrieve(query)
+    request_id = query.request_id or str(uuid4())
+    ctx = _pipeline.run(query)
+    ctx.request_id = request_id
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +182,7 @@ async def rag_context(query: RetrievalQuery) -> RagContextResponse:
         citations, and token estimate.
 
     """
-    ctx = _hybrid.retrieve(query)
+    ctx = _pipeline.run(query)
 
     blocks: list[str] = []
     for s in ctx.spans:

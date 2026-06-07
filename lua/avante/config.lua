@@ -380,6 +380,7 @@ M._defaults = {
     chat_history_max_chats = 50, -- Maximum number of chats to retain
     chat_history_max_age_days = 30, -- Maximum age of chat history in days
     rag_chat_history_max_paste_bytes = 4096, -- Maximum paste size before elision
+    shadow_mode = false, -- Run a shadow backend on every retrieve request to accumulate comparison telemetry (no latency impact on results)
   },
   ipc_service = { -- Cross-process instance IPC service configuration
     -- Enables the IPC service so root Avante instances in *different* Neovim

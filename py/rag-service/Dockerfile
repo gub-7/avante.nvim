@@ -21,4 +21,6 @@ RUN uv pip install --system -r requirements.txt
 
 COPY . .
 
+EXPOSE 20250
+
 CMD ["uvicorn", "src.main:app", "--workers", "3", "--host", "0.0.0.0", "--port", "20250"]

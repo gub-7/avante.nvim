@@ -94,29 +94,156 @@ def _nvidia() -> list[GPUDevice]:
     return gpus
 
 
-_GFX_RE = re.compile(r"gfx\d+")
+_GFX_RE = re.compile(r"gfx\d+\w*")
+_AGENT_STAR_RE = re.compile(r"^\*+$")
+_AGENT_HDR_RE = re.compile(r"^Agent\s+\d+", re.IGNORECASE)
+_SMI_VRAM_TOTAL_RE = re.compile(
+    r"GPU\[(\d+)\].*?VRAM\s+Total\s+Memory\s*\(B\)\s*:\s*(\d+)", re.IGNORECASE
+)
+_SMI_VRAM_USED_RE = re.compile(
+    r"GPU\[(\d+)\].*?VRAM\s+Total\s+Used\s+Memory\s*\(B\)\s*:\s*(\d+)", re.IGNORECASE
+)
+_SMI_USE_RE = re.compile(r"GPU\[(\d+)\].*?GPU\s+use\s*\(%\)\s*:\s*(\d+)", re.IGNORECASE)
+
+
+def _parse_rocminfo(out: str) -> list[dict]:
+    """Parse rocminfo stdout into a list of per-GPU info dicts.
+
+    Each dict has keys: name, gfx, vram_bytes.
+    Only agents that declare ``Device Type: GPU`` (or contain a gfx target)
+    are included — this filters out CPU agents reported by rocminfo.
+    """
+    agents: list[dict] = []
+    current: dict | None = None
+    in_global_heap = False
+
+    for raw_line in out.splitlines():
+        line = raw_line.strip()
+
+        # Separator line between agents (e.g. "********")
+        if _AGENT_STAR_RE.match(line):
+            if current is not None and (current["is_gpu"] or current["gfx"]):
+                agents.append(current)
+            current = None
+            in_global_heap = False
+            continue
+
+        if _AGENT_HDR_RE.match(line):
+            current = {"name": "AMD GPU", "gfx": None, "vram_bytes": None, "is_gpu": False}
+            in_global_heap = False
+            continue
+
+        if current is None:
+            continue
+
+        # GPU type flag
+        if "Device Type:" in line and "GPU" in line.upper():
+            current["is_gpu"] = True
+
+        # gfx target (e.g. "  Name:   gfx906" or "  ISA Info:  gfx906")
+        m = _GFX_RE.search(line)
+        if m:
+            current["gfx"] = m.group(0)
+
+        # Human-readable GPU name
+        if "Marketing Name:" in line:
+            val = line.split(":", 1)[1].strip()
+            if val:
+                current["name"] = val
+
+        # VRAM size: only count the first GLOBAL heap (device memory)
+        if "Heap Type:" in line:
+            in_global_heap = "GLOBAL" in line.upper()
+
+        if in_global_heap and "Size(in bytes):" in line:
+            try:
+                raw = line.split(":", 1)[1].strip().split()[0]
+                current["vram_bytes"] = int(raw)
+                in_global_heap = False  # take only the first GLOBAL entry
+            except (ValueError, IndexError):
+                pass
+
+    # Flush final agent
+    if current is not None and (current["is_gpu"] or current["gfx"]):
+        agents.append(current)
+
+    return agents
+
+
+def _rocm_smi_vram() -> tuple[dict[int, int], dict[int, int]]:
+    """Return (total_bytes_by_idx, free_bytes_by_idx) from rocm-smi --showmeminfo vram.
+
+    Falls back to empty dicts if rocm-smi is absent or fails.
+    """
+    out = _run(["rocm-smi", "--showmeminfo", "vram"])
+    total: dict[int, int] = {}
+    used: dict[int, int] = {}
+    for line in out.splitlines():
+        mt = _SMI_VRAM_TOTAL_RE.search(line)
+        if mt:
+            total[int(mt.group(1))] = int(mt.group(2))
+        mu = _SMI_VRAM_USED_RE.search(line)
+        if mu:
+            used[int(mu.group(1))] = int(mu.group(2))
+    free = {idx: total[idx] - used.get(idx, 0) for idx in total}
+    return total, free
 
 
 def _amd() -> list[GPUDevice]:
-    """Probe AMD GPUs via rocminfo or rocm-smi."""
-    out = _run(["rocminfo"]) or _run(["rocm-smi", "--showproductname"])
-    if not out:
+    """Probe AMD GPUs via rocminfo (with per-GPU VRAM from rocm-smi).
+
+    Multiple GPUs are properly enumerated.  Falls back to a minimal
+    single-device entry when rocminfo is unavailable.
+    """
+    rocminfo_out = _run(["rocminfo"])
+    if rocminfo_out:
+        agent_dicts = _parse_rocminfo(rocminfo_out)
+        if agent_dicts:
+            vram_total, vram_free = _rocm_smi_vram()
+            gpus: list[GPUDevice] = []
+            for i, ag in enumerate(agent_dicts):
+                # Prefer rocm-smi VRAM data (more reliable); fall back to
+                # rocminfo heap size if rocm-smi is absent.
+                tb = vram_total.get(i) or ag["vram_bytes"]
+                fb = vram_free.get(i)
+                if fb is None and tb is not None:
+                    fb = tb  # assume fully free if used data absent
+                gpus.append(GPUDevice(
+                    vendor="amd",
+                    name=ag["name"],
+                    gfx_target=ag["gfx"],
+                    vram_bytes=tb,
+                    free_vram_bytes=fb,
+                    supports_rocm=True,
+                    supports_vulkan=True,
+                ))
+            return gpus
+
+    # Fallback: rocm-smi --showproductname gives at least device names
+    smi_out = _run(["rocm-smi", "--showproductname"])
+    if not smi_out:
         return []
-    name = "AMD GPU"
-    gfx = None
-    for line in out.splitlines():
-        m = _GFX_RE.search(line)
-        if m:
-            gfx = m.group(0)
-        if "Marketing Name" in line:
-            name = line.split(":", 1)[1].strip() or name
-    return [GPUDevice(
-        vendor="amd",
-        name=name,
-        gfx_target=gfx,
-        supports_rocm=True,
-        supports_vulkan=True,
-    )]
+    # Attempt to pair product names with VRAM data
+    names: list[str] = []
+    for line in smi_out.splitlines():
+        if "Card series:" in line or "Card model:" in line or "GPU[" in line:
+            val = line.split(":", 1)[-1].strip()
+            if val:
+                names.append(val)
+    if not names:
+        names = ["AMD GPU"]
+    vram_total, vram_free = _rocm_smi_vram()
+    return [
+        GPUDevice(
+            vendor="amd",
+            name=names[i] if i < len(names) else f"AMD GPU {i}",
+            vram_bytes=vram_total.get(i),
+            free_vram_bytes=vram_free.get(i),
+            supports_rocm=True,
+            supports_vulkan=True,
+        )
+        for i in range(max(len(names), len(vram_total) or 1))
+    ]
 
 
 def _vulkan_only() -> list[GPUDevice]:
@@ -166,3 +293,28 @@ def probe(source: str = "container") -> HardwareProfile:
         captured_at=datetime.utcnow().isoformat(),
     )
 
+
+
+# ---------------------------------------------------------------------------
+# GPU availability helper — cached per process
+# ---------------------------------------------------------------------------
+
+_GPU_AVAILABLE: bool | None = None
+
+
+def gpu_available() -> bool:
+    """Return True if at least one NVIDIA GPU is detected on this host.
+
+    The result is cached after the first call so repeated invocations do
+    not re-run nvidia-smi.  The cache is intentionally process-scoped;
+    hardware topology does not change at runtime.
+
+    Only NVIDIA GPUs are considered here because the Milvus
+    GPU_CAGRA index requires CUDA support.  AMD/Vulkan-only devices
+    do not qualify.
+    """
+    global _GPU_AVAILABLE
+    if _GPU_AVAILABLE is None:
+        gpus = _nvidia()
+        _GPU_AVAILABLE = len(gpus) > 0
+    return _GPU_AVAILABLE
