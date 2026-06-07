@@ -7,27 +7,116 @@ local M = {}
 
 M.CANCEL_TOKEN = "__CANCELLED__"
 
--- Track cancellation state (legacy global — prefer session_ctx.is_cancelled for new code).
--- This flag is kept for backward compatibility with external callers but is no longer the
--- primary cancellation signal; per-stream session_ctx._cancel_state is used instead.
+-- Cancellation state model
+-- ------------------------
+-- avante supports multiple concurrent sidebar instances and a per-request
+-- cancel scope. There are three layers of cancellation, in order of breadth:
+--
+--   1. `M.is_cancelled` (module-global, legacy)
+--      Hard "nuclear" cancel used by :AvanteStop, shutdown, buffer-leave, etc.
+--      Aborts EVERY in-flight tool everywhere. Kept for back-compat with
+--      external callers that still poll it directly.
+--
+--   2. `session_ctx.is_cancelled` (per-stream / per-instance)
+--      Legacy per-session flag. Isolated to one stream so cancelling one
+--      avante instance does not affect concurrent streams in other sidebars.
+--      Some code paths in llm.lua still set this directly on the cancelled
+--      stream's session_ctx, so the tool runner keeps observing it.
+--
+--   3. `cancel_token` (per-request, rich)
+--      Preferred for new code. A `avante.CancelToken` allocated per logical
+--      LLM request and stashed on `session_ctx.cancel_token`. Supports soft
+--      cancels (`keep_tools_running = true`) so an in-flight tool can finish
+--      and have its result routed via `on_orphaned_result` into the next
+--      outbound payload — preventing the "chat split" bug where a soft cancel
+--      would otherwise leave a tool_use with no matching tool_result.
 M.is_cancelled = false
 ---@type avante.ui.Confirm
 M.confirm_popup = nil
 
---- Check whether the current execution has been cancelled.
---- Prefers per-stream session_ctx (set via session_ctx.is_cancelled) over the legacy global.
+--- Check whether the current execution has been cancelled by the legacy
+--- session-level or module-global flags. Does NOT consult the per-request
+--- cancel_token (use `is_token_cancelled` / `should_abort_tool` for that).
+--- Prefers per-stream session_ctx over the legacy global.
 ---@param session_ctx? table
 ---@return boolean
 function M.check_cancelled(session_ctx)
-  if session_ctx then return session_ctx.is_cancelled == true end
+  if session_ctx and session_ctx.is_cancelled == true then return true end
   return M.is_cancelled
 end
 
 --- Clear the cancellation flag for a session without touching the global.
+--- Intentionally does NOT reset M.is_cancelled — the global is only reset at
+--- stream start.
 ---@param session_ctx? table
 function M.reset_cancelled(session_ctx)
   if session_ctx then session_ctx.is_cancelled = false end
-  -- Intentionally does NOT reset M.is_cancelled — the global is only reset at stream start.
+end
+
+---@class avante.CancelToken
+---@field cancelled boolean              -- has cancellation been requested for this context?
+---@field request_id string|nil          -- the LLM request id this token belongs to
+---@field keep_tools_running boolean     -- if true, soft cancel: tools may keep running and have their results queued
+---@field cancelled_at integer|nil       -- vim.uv.hrtime() when cancelled
+---@field reason string|nil              -- optional human-readable reason
+
+---Create a per-request cancel token.
+---@param request_id string|nil
+---@param opts? { keep_tools_running?: boolean }
+---@return avante.CancelToken
+function M.make_cancel_token(request_id, opts)
+  opts = opts or {}
+  local keep = opts.keep_tools_running
+  if keep == nil then keep = true end
+  return {
+    cancelled = false,
+    request_id = request_id,
+    keep_tools_running = keep,
+    cancelled_at = nil,
+    reason = nil,
+  }
+end
+
+---Mark a cancel token as cancelled.
+---@param token avante.CancelToken|nil
+---@param opts? { abort_tools?: boolean, reason?: string }
+function M.cancel_token(token, opts)
+  if not token then return end
+  opts = opts or {}
+  token.cancelled = true
+  token.cancelled_at = vim.uv.hrtime()
+  if opts.reason then token.reason = opts.reason end
+  if opts.abort_tools then token.keep_tools_running = false end
+end
+
+---Has cancellation been requested for this context?
+---Includes the legacy global flag so that a hard global cancel still wins.
+---Per-session `session_ctx.is_cancelled` is intentionally NOT consulted here —
+---callers that care about that legacy signal should additionally use
+---`check_cancelled(session_ctx)`.
+---@param token avante.CancelToken|nil
+---@return boolean
+function M.is_token_cancelled(token)
+  if M.is_cancelled then return true end
+  if token and token.cancelled then return true end
+  return false
+end
+
+---Should an in-flight tool be aborted right now?
+---Soft (per-request) cancels with keep_tools_running=true do NOT abort tools —
+---they let the tool finish so its result can be queued for the next outbound
+---LLM payload. Only the legacy global flag, an explicit
+---`cancel({ abort_tools = true })`, or the legacy `session_ctx.is_cancelled`
+---signal (which is only set by paths that want hard-abort behavior) will
+---actually abort the tool.
+---@param token avante.CancelToken|nil
+---@param session_ctx? table
+---@return boolean
+function M.should_abort_tool(token, session_ctx)
+  if M.is_cancelled then return true end
+  if token and token.cancelled and not token.keep_tools_running then return true end
+  if session_ctx and session_ctx.is_cancelled == true then return true end
+  return false
 end
 
 ---@param rel_path string

@@ -150,6 +150,17 @@ local SIDEBAR_CONTAINERS = {
 local Sidebar = {}
 Sidebar.__index = Sidebar
 
+---@param acp_client avante.acp.ACPClient | nil
+---@param provider avante.ProviderName
+---@return avante.acp.ConfigOption[]
+local function get_acp_config_options(acp_client, provider)
+  local acp_provider = Config.acp_providers[provider]
+  if not acp_provider or not acp_client or not acp_client.config_options then return {} end
+  if not acp_client.config or acp_client.config.command ~= acp_provider.command then return {} end
+  if not vim.deep_equal(acp_client.config.args, acp_provider.args) then return {} end
+  return acp_client.config_options
+end
+
 ---@class avante.CodeState
 ---@field winid integer
 ---@field bufnr integer
@@ -376,6 +387,22 @@ function Sidebar:close(opts)
 
   self:recover_code_winhl()
   self:close_input_hint()
+end
+
+---Cancel only this sidebar's in-flight LLM request (soft cancel by default —
+---in-flight tools are allowed to finish and their results are queued for the
+---next outbound LLM payload). Pass `{ abort_tools = true }` to hard-cancel
+---running tools too. Returns true if there was a request to cancel.
+---@param cancel_opts? { abort_tools?: boolean, reason?: string }
+---@return boolean
+function Sidebar:cancel_request(cancel_opts)
+  if self.current_request and not self.current_request.is_done() then
+    self.current_request.cancel(cancel_opts or {})
+    self.is_generating = false
+    self.current_request = nil
+    return true
+  end
+  return false
 end
 
 function Sidebar:shutdown()
@@ -1104,11 +1131,9 @@ function Sidebar:render_header(winid, bufnr, header_text, hl, reverse_hl, opts)
   if opts.include_model and Config.windows.sidebar_header.include_model then
     if Config.acp_providers[Config.provider] then
       local parts = { Config.provider }
-      if self.acp_client and self.acp_client.config_options then
-        for _, opt in ipairs(self.acp_client.config_options) do
-          if opt.category == "model" then table.insert(parts, opt.currentValue) end
-          if opt.category == "mode" then table.insert(parts, opt.currentValue) end
-        end
+      for _, opt in ipairs(get_acp_config_options(self.acp_client, Config.provider)) do
+        if opt.category == "model" then table.insert(parts, opt.currentValue) end
+        if opt.category == "mode" then table.insert(parts, opt.currentValue) end
       end
       model_name = table.concat(parts, " | ")
     else
@@ -2287,6 +2312,7 @@ function Sidebar:clear_history(args, cb)
   if next(self.chat_history) ~= nil then
     self.chat_history.messages = {}
     self.chat_history.entries = {}
+    self.chat_history.acp_session_id = nil
     Path.history.save(self.code.bufnr, self.chat_history)
     self._history_cache_invalidated = true
     self:reload_chat_history()
@@ -2566,11 +2592,9 @@ function Sidebar:add_history_messages(messages, opts)
     if message.is_user_submission then
       message.provider = Config.provider
       if Config.acp_providers[Config.provider] then
-        if self.acp_client and self.acp_client.config_options then
-          for _, opt in ipairs(self.acp_client.config_options) do
-            if opt.category == "model" then message.model = opt.currentValue end
-            if opt.category == "mode" then message.mode = opt.currentValue end
-          end
+        for _, opt in ipairs(get_acp_config_options(self.acp_client, Config.provider)) do
+          if opt.category == "model" then message.model = opt.currentValue end
+          if opt.category == "mode" then message.mode = opt.currentValue end
         end
       else
         message.model = Config.get_provider_config(Config.provider).model
@@ -3653,9 +3677,24 @@ end
 function Sidebar:handle_submit(request)
   if Config.prompt_logger.enabled then PromptLogger.log_prompt(request) end
 
-  if self.is_generating then
-    self:add_history_messages({ History.Message:new("user", request) })
-    return
+  -- ChatGPT-style interrupt: if a previous request is still in flight, soft-cancel
+  -- it. Soft-cancel kills the LLM stream and drops any partial assistant text, but
+  -- lets in-flight tools keep running. When those tools complete, their results
+  -- are routed via on_orphaned_result (see llm.lua) and appended to chat history
+  -- so the *next* outbound LLM call (the one we're about to start) folds them in
+  -- naturally — without the previous, dead agent loop ever re-entering M._stream.
+  if self.is_generating and self.current_request and not self.current_request.is_done() then
+    Utils.debug(
+      "Sidebar:handle_submit interrupting in-flight request "
+        .. tostring(self.current_request.id)
+        .. " (tools may keep running and have results queued for the next turn)"
+    )
+    self.current_request.cancel({ abort_tools = false, reason = "superseded_by_user_submit" })
+    -- Eagerly clear our local in-flight bookkeeping; on_stop for the cancelled
+    -- request will still fire but it will short-circuit because the request_id
+    -- captured below won't match the new self.current_request.id.
+    self.is_generating = false
+    self.current_request = nil
   end
 
   if request:match("@codebase") and not vim.fn.expand("%:e") then
@@ -3783,9 +3822,24 @@ function Sidebar:handle_submit(request)
     end
   end
 
+  -- captured_request_id is filled in after Llm.stream() returns the handle (below).
+  -- Until then it remains nil; a stop event for a previously-cancelled request will
+  -- not match the new self.current_request.id and will skip the state reset.
+  local captured_request_id = nil
   ---@type AvanteLLMStopCallback
   local function on_stop(stop_opts)
-    self.is_generating = false
+    -- Only reset in-flight state if this stop belongs to the *current* request.
+    -- Stale stops from a superseded request must not clobber the new request's
+    -- state.
+    local is_current = (
+      self.current_request ~= nil
+      and captured_request_id ~= nil
+      and self.current_request.id == captured_request_id
+    )
+    if is_current or captured_request_id == nil then
+      self.is_generating = false
+      self.current_request = nil
+    end
 
     pcall(function()
       ---remove keymaps
@@ -3886,7 +3940,10 @@ function Sidebar:handle_submit(request)
             stream_options.memory = memory.content
           end
           stream_options.history_messages = self:get_history_messages_for_api()
-          Llm.stream(stream_options)
+          local handle = Llm.stream(stream_options)
+          self.current_request = handle
+          captured_request_id = handle and handle.id or nil
+          self.is_generating = true
         end
       )
     end
@@ -3930,7 +3987,10 @@ function Sidebar:handle_submit(request)
     end)
 
     if request ~= "" then on_state_change("generating") end
-    Llm.stream(stream_options)
+    self.is_generating = true
+    local handle = Llm.stream(stream_options)
+    self.current_request = handle
+    captured_request_id = handle and handle.id or nil
   end)
 end
 
