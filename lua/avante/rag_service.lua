@@ -430,7 +430,7 @@ end
 ---@return AvanteRagServiceIndexingStatusResponse | nil
 function M.indexing_status(uri)
   uri = M.to_container_uri(uri)
-  local resp = curl.post(M.get_rag_service_url() .. "/api/v1/indexing_status", {
+  local resp = curl.post(M.get_rag_service_url() .. "/api/v1/indexing-status", {
     headers = {
       ["Content-Type"] = "application/json",
     },
@@ -482,6 +482,252 @@ function M.get_resources()
     end)
     :totable()
   return jsn
+end
+
+-- ---------------------------------------------------------------------------
+-- New Phase-6 / Phase-10 / Phase-11 / Phase-15 RPC wrappers
+-- ---------------------------------------------------------------------------
+
+---@param query_body table  RetrievalQuery fields
+---@param on_complete fun(resp: table | nil, error: string | nil): nil
+function M.rag_search(query_body, on_complete)
+  query_body.base_uri = M.to_container_uri(query_body.base_uri or "")
+  curl.post(M.get_rag_service_url() .. "/api/v1/rag/search", {
+    headers = { ["Content-Type"] = "application/json" },
+    body = vim.json.encode(query_body),
+    timeout = 100000,
+    callback = function(resp)
+      if resp.status ~= 200 then
+        Utils.error("rag_search failed: " .. resp.body)
+        on_complete(nil, resp.body)
+        return
+      end
+      local jsn = vim.json.decode(resp.body)
+      on_complete(jsn, nil)
+    end,
+  })
+end
+
+---@param query_body table  RetrievalQuery fields
+---@param on_complete fun(resp: table | nil, error: string | nil): nil
+function M.rag_retrieve(query_body, on_complete)
+  query_body.base_uri = M.to_container_uri(query_body.base_uri or "")
+  curl.post(M.get_rag_service_url() .. "/api/v1/rag/retrieve", {
+    headers = { ["Content-Type"] = "application/json" },
+    body = vim.json.encode(query_body),
+    timeout = 100000,
+    callback = function(resp)
+      if resp.status ~= 200 then
+        Utils.error("rag_retrieve failed: " .. resp.body)
+        on_complete(nil, resp.body)
+        return
+      end
+      local jsn = vim.json.decode(resp.body)
+      -- Rewrite container-local URIs in spans back to host URIs
+      if jsn.spans then
+        jsn.spans = vim
+          .iter(jsn.spans)
+          :map(function(s)
+            local uri = M.to_local_uri(s.uri or "")
+            return vim.tbl_deep_extend("force", s, { uri = uri })
+          end)
+          :totable()
+      end
+      on_complete(jsn, nil)
+    end,
+  })
+end
+
+---@param query_body table  RetrievalQuery fields
+---@param on_complete fun(resp: table | nil, error: string | nil): nil
+function M.rag_context(query_body, on_complete)
+  query_body.base_uri = M.to_container_uri(query_body.base_uri or "")
+  curl.post(M.get_rag_service_url() .. "/api/v1/rag/context", {
+    headers = { ["Content-Type"] = "application/json" },
+    body = vim.json.encode(query_body),
+    timeout = 100000,
+    callback = function(resp)
+      if resp.status ~= 200 then
+        Utils.error("rag_context failed: " .. resp.body)
+        on_complete(nil, resp.body)
+        return
+      end
+      local jsn = vim.json.decode(resp.body)
+      if jsn.spans then
+        jsn.spans = vim
+          .iter(jsn.spans)
+          :map(function(s)
+            local uri = M.to_local_uri(s.uri or "")
+            return vim.tbl_deep_extend("force", s, { uri = uri })
+          end)
+          :totable()
+      end
+      on_complete(jsn, nil)
+    end,
+  })
+end
+
+---@param query_body table  RetrievalQuery fields
+---@param on_complete fun(resp: table | nil, error: string | nil): nil
+function M.rag_agentic_retrieve(query_body, on_complete)
+  query_body.base_uri = M.to_container_uri(query_body.base_uri or "")
+  curl.post(M.get_rag_service_url() .. "/api/v1/rag/agentic-retrieve", {
+    headers = { ["Content-Type"] = "application/json" },
+    body = vim.json.encode(query_body),
+    timeout = 100000,
+    callback = function(resp)
+      if resp.status ~= 200 then
+        Utils.error("rag_agentic_retrieve failed: " .. resp.body)
+        on_complete(nil, resp.body)
+        return
+      end
+      local jsn = vim.json.decode(resp.body)
+      if jsn.spans then
+        jsn.spans = vim
+          .iter(jsn.spans)
+          :map(function(s)
+            local uri = M.to_local_uri(s.uri or "")
+            return vim.tbl_deep_extend("force", s, { uri = uri })
+          end)
+          :totable()
+      end
+      on_complete(jsn, nil)
+    end,
+  })
+end
+
+---@param body table  SymbolSearchRequest fields (base_uri, q, kinds?, limit?)
+---@param on_complete fun(resp: table | nil, error: string | nil): nil
+function M.rag_symbols(body, on_complete)
+  body.base_uri = M.to_container_uri(body.base_uri or "")
+  curl.post(M.get_rag_service_url() .. "/api/v1/rag/symbols", {
+    headers = { ["Content-Type"] = "application/json" },
+    body = vim.json.encode(body),
+    timeout = 60000,
+    callback = function(resp)
+      if resp.status ~= 200 then
+        Utils.error("rag_symbols failed: " .. resp.body)
+        on_complete(nil, resp.body)
+        return
+      end
+      on_complete(vim.json.decode(resp.body), nil)
+    end,
+  })
+end
+
+---@return table | nil
+function M.runtime_profile_get()
+  local resp = curl.get(M.get_rag_service_url() .. "/api/v1/runtime/profile", {
+    headers = { ["Content-Type"] = "application/json" },
+  })
+  if resp.status ~= 200 then
+    Utils.error("runtime_profile_get failed: " .. resp.body)
+    return nil
+  end
+  return vim.json.decode(resp.body)
+end
+
+---@param profile_body table
+---@return table | nil
+function M.runtime_profile_post(profile_body)
+  local resp = curl.post(M.get_rag_service_url() .. "/api/v1/runtime/profile", {
+    headers = { ["Content-Type"] = "application/json" },
+    body = vim.json.encode(profile_body),
+  })
+  if resp.status ~= 200 then
+    Utils.error("runtime_profile_post failed: " .. resp.body)
+    return nil
+  end
+  return vim.json.decode(resp.body)
+end
+
+---@param prefer_vendor string | nil
+---@return table | nil
+function M.runtime_recommend(prefer_vendor)
+  local url = M.get_rag_service_url() .. "/api/v1/runtime/recommend"
+  if prefer_vendor and prefer_vendor ~= "" then
+    url = url .. "?prefer_vendor=" .. prefer_vendor
+  end
+  local resp = curl.get(url, {
+    headers = { ["Content-Type"] = "application/json" },
+  })
+  if resp.status ~= 200 then
+    Utils.error("runtime_recommend failed: " .. resp.body)
+    return nil
+  end
+  return vim.json.decode(resp.body)
+end
+
+---@param turn table  ChatTurnUpsert fields
+function M.chat_history_upsert(turn)
+  turn.base_uri = M.to_container_uri(turn.base_uri or "")
+  vim.system(
+    {
+      "curl",
+      "-X",
+      "POST",
+      M.get_rag_service_url() .. "/api/v1/chat-history/upsert",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      vim.json.encode(turn),
+    },
+    { text = true },
+    function(output)
+      if output.code ~= 0 then
+        Utils.error("chat_history_upsert failed: " .. (output.stderr or ""))
+      else
+        Utils.debug("chat_history_upsert ok for chat_id=" .. (turn.chat_id or "?"))
+      end
+    end
+  )
+end
+
+---@param base_uri string
+---@param chat_id string
+function M.chat_history_delete(base_uri, chat_id)
+  base_uri = M.to_container_uri(base_uri)
+  vim.system(
+    {
+      "curl",
+      "-X",
+      "POST",
+      M.get_rag_service_url() .. "/api/v1/chat-history/delete",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      vim.json.encode({ base_uri = base_uri, chat_id = chat_id }),
+    },
+    { text = true },
+    function(output)
+      if output.code ~= 0 then
+        Utils.error("chat_history_delete failed: " .. (output.stderr or ""))
+      end
+    end
+  )
+end
+
+---@param base_uri string
+function M.chat_history_purge(base_uri)
+  base_uri = M.to_container_uri(base_uri)
+  vim.system(
+    {
+      "curl",
+      "-X",
+      "POST",
+      M.get_rag_service_url() .. "/api/v1/chat-history/purge",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      vim.json.encode({ base_uri = base_uri }),
+    },
+    { text = true },
+    function(output)
+      if output.code ~= 0 then
+        Utils.error("chat_history_purge failed: " .. (output.stderr or ""))
+      end
+    end
+  )
 end
 
 return M

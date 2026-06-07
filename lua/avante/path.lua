@@ -269,6 +269,9 @@ function History.save(bufnr, history)
   Utils.debug("History.save writing", history.filename)
   history_filepath:write(json_content, "w")
   History.save_latest_filename(bufnr, history.filename)
+  -- Sync chat history to the RAG service (debounced, no-op when disabled)
+  local ok_sync, sync = pcall(require, "avante.rag_chat_sync")
+  if ok_sync then sync.on_save(bufnr, history) end
 end
 
 --- Deletes a specific chat history file.
@@ -279,6 +282,9 @@ function History.delete(bufnr, filename)
   if history_filepath:exists() then
     local was_latest = (filename == History.get_latest_filename(bufnr, false))
     vim.fs.rm(tostring(history_filepath))
+    -- Notify the RAG service to remove the deleted chat turn
+    local ok_sync, sync = pcall(require, "avante.rag_chat_sync")
+    if ok_sync then sync.on_delete(bufnr, filename) end
 
     -- Clean up the per-instance subdirectory if it's now empty.
     -- Only remove direct subdirectories of history_dir (not history_dir itself).

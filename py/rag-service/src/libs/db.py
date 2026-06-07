@@ -39,6 +39,74 @@ CREATE INDEX IF NOT EXISTS idx_resources_name ON resources(name);
 CREATE INDEX IF NOT EXISTS idx_resources_uri ON resources(uri);
 CREATE INDEX IF NOT EXISTS idx_resources_status ON resources(status);
 CREATE INDEX IF NOT EXISTS idx_status ON indexing_history(status);
+
+-- Symbols extracted by tree-sitter during indexing
+CREATE TABLE IF NOT EXISTS symbols (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_uri TEXT NOT NULL,
+    file_uri TEXT NOT NULL,
+    symbol_name TEXT NOT NULL,
+    symbol_kind TEXT NOT NULL,
+    start_line INTEGER,
+    end_line INTEGER,
+    language TEXT,
+    text_hash TEXT,
+    metadata TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(symbol_name);
+CREATE INDEX IF NOT EXISTS idx_symbols_file_uri ON symbols(file_uri);
+CREATE INDEX IF NOT EXISTS idx_symbols_resource_uri ON symbols(resource_uri);
+
+-- Per-project profile cache
+CREATE TABLE IF NOT EXISTS project_profiles (
+    resource_uri TEXT PRIMARY KEY,
+    profile_json TEXT NOT NULL,
+    profile_hash TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Chat history (denormalised; embeddings live in Chroma)
+CREATE TABLE IF NOT EXISTS chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_uri TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    message_idx INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content_sanitized TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    token_estimate INTEGER NOT NULL,
+    title TEXT,
+    timestamp TEXT,
+    UNIQUE(resource_uri, chat_id, message_idx)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_resource ON chat_history(resource_uri);
+CREATE INDEX IF NOT EXISTS idx_chat_chat_id ON chat_history(resource_uri, chat_id);
+
+-- Cached hardware profile (host-submitted preferred)
+CREATE TABLE IF NOT EXISTS hardware_profile (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    profile_json TEXT NOT NULL,
+    source TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Cached benchmark results keyed by (hw_hash, backend, model, context)
+CREATE TABLE IF NOT EXISTS benchmark_cache (
+    hw_hash TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    model TEXT NOT NULL,
+    context_tokens INTEGER NOT NULL,
+    result_json TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (hw_hash, backend, model, context_tokens)
+);
+
+-- Schema version sentinel
+CREATE TABLE IF NOT EXISTS _schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT OR REPLACE INTO _schema_meta(key, value) VALUES ('version', '2');
 """
 
 
