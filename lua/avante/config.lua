@@ -379,6 +379,10 @@ M._defaults = {
       extra = nil, -- Extra configuration options for the embedding model
     },
     docker_extra_args = "", -- Extra arguments to pass to the docker command
+    index_chat_history = true, -- Whether to index chat history for retrieval
+    chat_history_max_chats = 50, -- Maximum number of chats to retain
+    chat_history_max_age_days = 30, -- Maximum age of chat history in days
+    rag_chat_history_max_paste_bytes = 4096, -- Maximum paste size before elision
   },
   web_search_engine = {
     provider = "tavily",

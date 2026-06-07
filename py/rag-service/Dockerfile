@@ -4,7 +4,8 @@ COPY gitconfig /root/.gitconfig
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl git \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl git ripgrep pciutils vulkan-tools \
   && rm -rf /var/lib/apt/lists/* \
   && curl -LsSf https://astral.sh/uv/install.sh | sh
 

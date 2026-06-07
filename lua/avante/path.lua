@@ -180,6 +180,9 @@ function History.save(bufnr, history)
   local history_filepath = History.get_filepath(bufnr, history.filename)
   history_filepath:write(vim.json.encode(history), "w")
   History.save_latest_filename(bufnr, history.filename)
+  -- Sync chat history to the RAG service (debounced, no-op when disabled)
+  local ok_sync, sync = pcall(require, "avante.rag_chat_sync")
+  if ok_sync then sync.on_save(bufnr, history) end
 end
 
 --- Deletes a specific chat history file.
@@ -190,6 +193,9 @@ function History.delete(bufnr, filename)
   if history_filepath:exists() then
     local was_latest = (filename == History.get_latest_filename(bufnr, false))
     vim.fs.rm(tostring(history_filepath))
+    -- Notify the RAG service to remove the deleted chat turn
+    local ok_sync, sync = pcall(require, "avante.rag_chat_sync")
+    if ok_sync then sync.on_delete(bufnr, filename) end
 
     if was_latest then
       local remaining_histories = History.list(bufnr) -- This list is sorted by recency
