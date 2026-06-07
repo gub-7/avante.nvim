@@ -463,6 +463,40 @@ function History.from_file(filepath)
   end
 end
 
+---Find the most recently modified instance directory for the buffer's project
+---whose instance_name is NOT in `running_names`.  Uses only directory/file
+---stat calls (no JSON parsing) so it is fast to call on every sidebar open.
+---Returns a relative filename like "<instance_name>/0.json", or nil when every
+---existing instance is occupied or the history directory is empty.
+---@param bufnr integer
+---@param running_names table<string, boolean>  instance names to skip
+---@return string | nil filename
+function History.find_unowned_instance(bufnr, running_names)
+  local history_dir = History.get_history_dir(bufnr)
+  migrate_legacy_files(history_dir)
+
+  local subdirs = Scan.scan_dir(tostring(history_dir), { depth = 1, only_dirs = true, add_dirs = true })
+  local available = {}
+  for _, subdir_path in ipairs(subdirs) do
+    local subdir = Path:new(subdir_path)
+    if not History.is_instance_deleted(subdir) then
+      local instance_dirname = filepath_to_filename(subdir)
+      if not running_names[instance_dirname] then
+        local zero_json = subdir:joinpath("0.json")
+        local stat = vim.uv.fs_stat(tostring(zero_json))
+        if stat then
+          table.insert(available, { dirname = instance_dirname, mtime = stat.mtime.sec or 0 })
+        end
+      end
+    end
+  end
+
+  if #available == 0 then return nil end
+  -- Most recently modified instance first.
+  table.sort(available, function(a, b) return a.mtime > b.mtime end)
+  return available[1].dirname .. "/0.json"
+end
+
 -- Loads the chat history for the given buffer.  Transparently merges
 -- multi-part instance directories (0.json + 1.json + …) produced by the
 -- 4 MB split logic in History.save.
@@ -471,6 +505,17 @@ end
 ---@return avante.ChatHistory
 function History.load(bufnr, filename)
   local history_dir = History.get_history_dir(bufnr)
+
+  -- When no filename is given, derive the canonical latest filename from
+  -- metadata.json so we always go through the right code path (instance-dir
+  -- branch vs. legacy branch) instead of hard-coding the legacy path.
+  if not filename then
+    filename = History.get_latest_filename(bufnr, false)
+    -- get_latest_filename may return a legacy bare name like "0.json"; keep
+    -- nil semantics clear so the fall-through below still works.
+    if not filename or filename == "" then filename = nil end
+  end
+
   local instance_dirname = filename and filename:match("^(.-)/[^/]+%.json$") or nil
 
   if instance_dirname then

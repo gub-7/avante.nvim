@@ -1997,6 +1997,30 @@ local function render_chat_record_prefix(timestamp, provider, model, mode, reque
   return res .. "\n\n> " .. request:gsub("\n", "\n> "):gsub("([%w-_]+)%b[]", "`%0`")
 end
 
+---Render a lightweight "current session" info banner for a blank/new history.
+---Mirrors the format of render_chat_record_prefix but without a user request.
+---@return string
+local function render_session_banner()
+  local ts = Utils.get_timestamp()
+  local provider = Config.provider or "unknown"
+  local acp_provider = Config.acp_providers and Config.acp_providers[provider]
+  local res
+  if acp_provider then
+    res = "- Datetime: " .. ts .. "\n" .. "- ACP:      " .. provider
+    local ok, pcfg = pcall(function() return Config.get_provider_config(provider) end)
+    if ok and pcfg then
+      local model = pcfg.model
+      if model and model ~= "" and model ~= "unknown" then res = res .. "\n" .. "- Model:    " .. model end
+    end
+  else
+    local model = "unknown"
+    local ok, pcfg = pcall(function() return Config.get_provider_config(provider) end)
+    if ok and pcfg and pcfg.model and pcfg.model ~= "" then model = pcfg.model end
+    res = "- Datetime: " .. ts .. "\n" .. "- Model:    " .. provider .. "/" .. model
+  end
+  return res
+end
+
 local function calculate_config_window_position()
   local position = Config.windows.position
   if position == "smart" then
@@ -2148,6 +2172,26 @@ function Sidebar:get_history_lines(history, ignore_record_prefix)
   local res = {}
   local tool_message_positions = {}
   local is_first_user_submission = true
+
+  -- For a blank/new session show a lightweight "current session" banner so
+  -- the user can see the datetime and model even before the first submission.
+  -- Skip in logo-mode (ignore_record_prefix == true) to keep the logo clean.
+  if not ignore_record_prefix then
+    local has_user_submission = false
+    for _, msg in ipairs(history_messages) do
+      if msg.is_user_submission then
+        has_user_submission = true
+        break
+      end
+    end
+    if not has_user_submission then
+      local banner = render_session_banner()
+      for _, line_ in ipairs(vim.split(banner, "\n")) do
+        table.insert(res, Line:new({ { line_ } }))
+      end
+    end
+  end
+
   for _, message in ipairs(history_messages) do
     local lines = self:get_message_lines(ctx, message, history_messages, ignore_record_prefix)
     if #lines == 0 then goto continue end
@@ -3026,23 +3070,49 @@ function Sidebar:reload_chat_history()
     Avante.instance_registry[self.chat_history.instance_name] = nil
   end
 
-  -- Load the specific file this sidebar is pinned to (if any), so that a
-  -- concurrent Avante instance saving to the shared metadata.json cannot
-  -- hijack this sidebar's history.
-  self.chat_history = Path.history.load(self.code.bufnr, self.current_history_filename)
+  if self.current_history_filename then
+    -- Pinned to a specific file — load it directly so a concurrent instance
+    -- updating metadata.json cannot hijack this sidebar's session.
+    self.chat_history = Path.history.load(self.code.bufnr, self.current_history_filename)
+  else
+    -- No pin: find the most recently modified instance for this project that
+    -- is NOT already claimed by another live sidebar (same process or, when
+    -- the IPC service is enabled, another nvim process).
+    local running_names = {}
+    for name, owner in pairs(Avante.instance_registry) do
+      if owner ~= self then running_names[name] = true end
+    end
+    -- Cross-process check via optional IPC service (synchronous but fast when
+    -- the sidecar is up; returns {} immediately when it is not running).
+    if Config.ipc_service and Config.ipc_service.enabled then
+      local ok, IpcService = pcall(require, "avante.ipc_service")
+      if ok then
+        local ipc_instances = IpcService.list_instances()
+        for _, inst in ipairs(ipc_instances) do
+          if inst.name then running_names[inst.name] = true end
+        end
+      end
+    end
+
+    local target_filename = Path.history.find_unowned_instance(self.code.bufnr, running_names)
+    if target_filename then
+      self.chat_history = Path.history.load(self.code.bufnr, target_filename)
+      Utils.debug("Sidebar:reload_chat_history picked unowned instance", target_filename)
+    else
+      -- All existing instances are live, or no history exists yet — start fresh.
+      self.chat_history = Path.history.new(self.code.bufnr)
+      Utils.debug("Sidebar:reload_chat_history no unowned instance found, created fresh")
+    end
+  end
+
   Utils.debug("Sidebar:reload_chat_history loaded", tostring(self.chat_history and self.chat_history.filename), tostring(self.chat_history and self.chat_history.instance_name))
 
-  -- Isolation guard: if the history we just loaded is already owned by a
-  -- *different* live sidebar, fork to a fresh independent history.  This
-  -- prevents two Avante windows that share the same source buffer from
-  -- inheriting the same chat timeline, and guarantees each window gets a
-  -- unique instance_name for cross-instance messaging.
+  -- Safety guard: if the history we loaded is somehow already owned by a
+  -- *different* live sidebar (e.g. two sidebars opening simultaneously for
+  -- the same buffer), fork to a fresh independent session.
   if self.chat_history and self.chat_history.instance_name then
     local existing_owner = Avante.instance_registry[self.chat_history.instance_name]
     if existing_owner ~= nil and existing_owner ~= self then
-      -- The loaded history is already in use — branch off to a fresh session.
-      -- The fresh history is intentionally not saved here; it will be written
-      -- to disk the first time the user sends a message (via save_history()).
       Utils.debug("Sidebar:reload_chat_history isolation guard triggered for", self.chat_history.instance_name, "— forking fresh history")
       local fresh = Path.history.new(self.code.bufnr)
       self.chat_history = fresh
