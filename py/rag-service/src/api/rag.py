@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException
 from libs.utils import is_local_uri, uri_to_path
 from models.rag import FileSpan, RagContextResponse, RetrievalQuery, RetrievedContext
 from pydantic import BaseModel
-from rag.chat_history_index import ChatHistoryIndex
+from api.chat_history import _idx as _chat_history
 from rag.engine import get_index
 from rag.hybrid_retriever import HybridRetriever
 from rag.semantic_search import SemanticRetriever
@@ -24,13 +24,12 @@ from rag.symbol_index import search_symbols
 router = APIRouter(prefix="/api/v1/rag", tags=["rag"])
 
 # ---------------------------------------------------------------------------
-# Module-level singletons — constructed at import time; index is resolved lazily.
-# _chat_history uses the same ChromaDB persistent directory as the chat-history
-# API router (api/chat_history.py), so all writes made through that router are
-# immediately visible to retrieval queries here.
+# Module-level singleton — constructed at import time; index is resolved lazily.
+# _chat_history re-uses the singleton from api.chat_history to avoid creating
+# two ChromaDB PersistentClient instances pointing at the same directory, which
+# would crash the server with "Empty reply from server" on the upsert endpoint.
 # ---------------------------------------------------------------------------
 
-_chat_history = ChatHistoryIndex()
 _hybrid = HybridRetriever(semantic=SemanticRetriever(get_index), chat_history=_chat_history)
 
 
